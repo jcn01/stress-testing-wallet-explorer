@@ -12,22 +12,27 @@ import (
 
 const (
 	baseUrl = "https://api-2.testnet2.xpxsirius.io"
+	TX_FEE  = 1036.3
 )
 
+var ctx context.Context
 var client *sdk.Client
 var account *sdk.Account
+var accInfo *sdk.AccountInfo
 var privateKey *string
 var number *int
+var innerTxs []sdk.Transaction
 
 func init() {
 	privateKey = flag.String("key", "", "Account private key")
 	number = flag.Int("num", 0, "Number of assets to be created")
 	flag.Parse()
 
-	conf, err := sdk.NewConfig(context.Background(), []string{baseUrl})
+	ctx = context.Background()
+
+	conf, err := sdk.NewConfig(ctx, []string{baseUrl})
 	if err != nil {
 		fmt.Printf("NewConfig returned error: %s", err)
-		return
 	}
 
 	client = sdk.NewClient(nil, conf)
@@ -35,21 +40,30 @@ func init() {
 	account, err = client.NewAccountFromPrivateKey(*privateKey)
 	if err != nil {
 		fmt.Printf("NewAccountFromPrivateKey returned error: %s", err)
-		return
+	}
+
+	accInfo, err = client.Account.GetAccountInfo(ctx, account.Address)
+	if err != nil {
+		fmt.Printf("GetAccountInfo returned error: %s", err)
 	}
 
 }
 
 func main() {
-	for i := 0; i < (*number); i++ {
-		createAsset()
-		// wait for the transaction to be confirmed
-		time.Sleep(30 * time.Second)
-
+	isSufficient := isXpxBalanceSufficient()
+	if !isSufficient {
+		fmt.Println("Not enough XPX balance!")
+	} else if isSufficient && *number > 0 {
+		fmt.Println("Enough XPX balance, generating list of assets...")
+		for i := 0; i < (*number); i++ {
+			mosaicDefinitionTx, mosaicSupplyChangeTx := createAsset()
+			innerTxs = append(innerTxs, mosaicDefinitionTx, mosaicSupplyChangeTx)
+		}
+		signCreateAssetTx(innerTxs)
 	}
 }
 
-func createAsset() {
+func createAsset() (*sdk.MosaicDefinitionTransaction, *sdk.MosaicSupplyChangeTransaction) {
 	nonce := rand.New(rand.NewSource(time.Now().UTC().UnixNano())).Uint32()
 
 	//Mosaic defination transaction
@@ -62,7 +76,6 @@ func createAsset() {
 
 	if err != nil {
 		fmt.Printf("NewMosaicDefinitionTransaction returned error: %s", err)
-		return
 	}
 
 	mosaic, err := sdk.NewMosaicIdFromNonceAndOwner(nonce, account.PublicAccount.PublicKey)
@@ -84,33 +97,59 @@ func createAsset() {
 	mosaicDefinitionTx.ToAggregate(account.PublicAccount)
 	mosaicSupplyChangeTx.ToAggregate(account.PublicAccount)
 
-	// Create an aggregate complete transaction
-	aggregateTx, err := client.NewCompleteAggregateTransaction(
+	return mosaicDefinitionTx, mosaicSupplyChangeTx
+
+}
+
+func signCreateAssetTx(innerTxs []sdk.Transaction) {
+	// Aggregate complete transaction
+	aggTx, err := client.NewCompleteAggregateTransaction(
 		sdk.NewDeadline(time.Hour),
-		[]sdk.Transaction{
-			mosaicDefinitionTx,
-			mosaicSupplyChangeTx},
+		innerTxs,
 	)
 
 	if err != nil {
 		fmt.Printf("NewCompleteAggregateTransaction returned error: %s", err)
-		return
 	}
 
 	// Sign transaction
-	signedTx, err := account.Sign(aggregateTx)
+	signedTx, err := account.Sign(aggTx)
 	if err != nil {
 		fmt.Printf("Sign returned error: %s", err)
-		return
 	}
 
 	// Announce transaction
 	_, err = client.Transaction.Announce(context.Background(), signedTx)
 	if err != nil {
 		fmt.Printf("Transaction.Announce returned error: %s", err)
-		return
 	}
 
-	fmt.Println(signedTx.Hash.String())
+	fmt.Printf("Tx hash: %s\n", signedTx.Hash.String())
+}
 
+// Get xpx balance of an account
+func getXpxBalanceByAccount(accInfo *sdk.AccountInfo) (balance float64) {
+	nsId, _ := sdk.NewNamespaceIdFromName("prx.xpx")
+	xpx, _ := client.Resolve.GetMosaicInfoByAssetId(context.Background(), nsId)
+
+	for _, mosaic := range accInfo.Mosaics {
+		if eq, _ := mosaic.AssetId.Equals(xpx.MosaicId); eq {
+			balance = float64(mosaic.Amount) / 1000000
+		}
+	}
+
+	return balance
+}
+
+// Check if private key account has sufficient balance
+func isXpxBalanceSufficient() bool {
+	xpxBalance := getXpxBalanceByAccount(accInfo)
+	totalTxFee := TX_FEE * float64(*number)
+	maxAsset := int(xpxBalance / TX_FEE)
+
+	fmt.Printf("Current balance\t: %v\n", xpxBalance)
+	fmt.Printf("Total fee\t: %v\n", totalTxFee)
+	fmt.Printf("Maximum asset\t: %v\n\n", maxAsset)
+
+	return totalTxFee <= xpxBalance
 }
