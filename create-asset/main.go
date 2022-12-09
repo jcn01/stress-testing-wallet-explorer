@@ -124,7 +124,7 @@ func signAggCompleteTx(aggTx *sdk.AggregateTransaction) {
 	}
 
 	// Announce transaction
-	_, err = client.Transaction.Announce(context.Background(), signedTx)
+	_, err = client.Transaction.Announce(ctx, signedTx)
 	if err != nil {
 		fmt.Printf("Transaction.Announce returned error: %s", err)
 	}
@@ -134,7 +134,7 @@ func signAggCompleteTx(aggTx *sdk.AggregateTransaction) {
 
 func getXpxBalanceByAccount(accInfo *sdk.AccountInfo) (balance float64) {
 	nsId, _ := sdk.NewNamespaceIdFromName("prx.xpx")
-	xpx, _ := client.Resolve.GetMosaicInfoByAssetId(context.Background(), nsId)
+	xpx, _ := client.Resolve.GetMosaicInfoByAssetId(ctx, nsId)
 
 	for _, mosaic := range accInfo.Mosaics {
 		if eq, _ := mosaic.AssetId.Equals(xpx.MosaicId); eq {
