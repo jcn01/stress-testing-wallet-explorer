@@ -13,16 +13,22 @@ import (
 )
 
 const (
-	baseUrl = "https://api-2.testnet2.xpxsirius.io"
-	FEE     = 67.3
+	baseUrl          = "https://api-2.testnet2.xpxsirius.io"
+	LOCK_FUND        = 10
+	LOCK_FUND_TX_FEE = 26.7
 )
 
 var ctx context.Context
 var client *sdk.Client
+var account *sdk.Account
 var cosigner *sdk.Account
 var cosignerPrivateKey *string
+var cosignatories []*sdk.Account
+var accounts []*sdk.Account
+var trxs []sdk.Transaction
 
 func init() {
+
 	cosignerPrivateKey = flag.String("key", "", "Cosigner account private key")
 	flag.Parse()
 
@@ -39,29 +45,40 @@ func init() {
 	if err != nil {
 		fmt.Printf("NewAccountFromPrivateKey returned error: %s", err)
 	}
+
 }
 
 func main() {
 
-	privateKeys := readFile()
+	publicKeys := readFile()
+	multisigAccounts := getAccounts(publicKeys)
 
-	for i := range privateKeys {
-		multisigAcc, accInfo := getAccount(privateKeys[i])
-		isSufficient := isXpxBalanceSufficient(accInfo)
-
-		if !isSufficient {
-			fmt.Printf("Not enough XPX balance! Account: %s\n", multisigAcc.Address.String())
-			continue
-		} else if isSufficient {
-			fmt.Println("Enough XPX balance, adding cosigner to account...")
-			createMultisigAccount(multisigAcc)
+	for i := range multisigAccounts {
+		trx := addCosigner(multisigAccounts[i])
+		trxs = append(trxs, trx)
+		if i != 0 {
+			cosignatories = append(cosignatories, cosigner)
+			cosignatories = append(cosignatories, multisigAccounts[i])
 		}
+	}
+
+	aggBondedTx := createAggregateBondedTx(trxs)
+
+	//first account in .txt file will pay for lock funds and tx fee
+	firstMultisigAccInfo := getAccountInfo(multisigAccounts[0])
+	isSufficient := isXpxBalanceSufficient(aggBondedTx, firstMultisigAccInfo)
+
+	if !isSufficient {
+		fmt.Printf("Not enough XPX balance!")
+	} else if isSufficient {
+		fmt.Println("Enough XPX balance, adding cosigner to accounts...")
+		signAggBondedTxWithCosignatures(aggBondedTx, multisigAccounts[0], cosignatories)
 	}
 
 }
 
-func createMultisigAccount(multisigAcc *sdk.Account) {
-	//New modify multisig account transaction
+func addCosigner(multisigAcc *sdk.Account) *sdk.ModifyMultisigAccountTransaction {
+
 	convertIntoMultisigTx, err := client.NewModifyMultisigAccountTransaction(
 		sdk.NewDeadline(time.Hour),
 		1,
@@ -77,82 +94,98 @@ func createMultisigAccount(multisigAcc *sdk.Account) {
 
 	convertIntoMultisigTx.ToAggregate(multisigAcc.PublicAccount)
 
+	return convertIntoMultisigTx
+}
+
+func createAggregateBondedTx(trxs []sdk.Transaction) *sdk.AggregateTransaction {
+
 	aggBondedTx, err := client.NewBondedAggregateTransaction(
 		sdk.NewDeadline(time.Hour),
-		[]sdk.Transaction{convertIntoMultisigTx},
+		trxs,
 	)
 	if err != nil {
 		panic(err)
 	}
 
-	signedAggBondedTx, err := multisigAcc.Sign(aggBondedTx)
+	return aggBondedTx
+}
+
+func signAggBondedTxWithCosignatures(aggTx *sdk.AggregateTransaction, account *sdk.Account, cosignatories []*sdk.Account) {
+
+	signedTx, err := account.SignWithCosignatures(aggTx, cosignatories)
 	if err != nil {
-		panic(err)
+		fmt.Printf("Sign returned error: %s", err)
 	}
 
-	{ //Lock funds transaction
-		lockFundsTx, err := client.NewLockFundsTransaction(sdk.NewDeadline(time.Hour*1), sdk.XpxRelative(10), sdk.Duration(100), signedAggBondedTx)
-		if err != nil {
-			fmt.Printf("NewLockFundsTransaction returned error: %s", err)
-		}
+	createLockFundsTx(signedTx, account)
 
-		// Future multisig account will pay for the lock funds
-		signedlockFundsTx, err := multisigAcc.Sign(lockFundsTx)
-		if err != nil {
-			fmt.Printf("Sign returned error: %s", err)
-		}
-
-		_, err = client.Transaction.Announce(context.Background(), signedlockFundsTx)
-		if err != nil {
-			fmt.Printf("Transaction.Announce returned error: %s", err)
-		}
-
-		time.Sleep(30 * time.Second)
+	signedTxHash, err := client.Transaction.Announce(ctx, signedTx)
+	if err != nil {
+		fmt.Printf("Transaction.Announce returned error: %s", err)
 	}
 
-	_, err = client.Transaction.AnnounceAggregateBonded(context.Background(), signedAggBondedTx)
+	fmt.Printf("Tx Hash\t: %s\n", signedTxHash)
+}
+
+func createLockFundsTx(signedTx *sdk.SignedTransaction, account *sdk.Account) {
+
+	lockFundsTx, err := client.NewLockFundsTransaction(
+		sdk.NewDeadline(time.Hour*1),
+		sdk.XpxRelative(10),
+		sdk.Duration(100),
+		signedTx,
+	)
 	if err != nil {
-		fmt.Printf("Transaction.AnnounceAggregateBonded returned error: %s", err)
-		return
+		fmt.Printf("NewLockFundsTransaction returned error: %s", err)
 	}
 
-	time.Sleep(30 * time.Second)
-
-	//New cosignature transaction
-	cosignatureTx := sdk.NewCosignatureTransactionFromHash(signedAggBondedTx.Hash)
-	signedCosignatureTx, err := cosigner.SignCosignatureTransaction(cosignatureTx)
+	signedlockFundsTx, err := account.Sign(lockFundsTx)
 	if err != nil {
-		fmt.Printf("SignCosignatureTransaction returned error: %s", err)
-		return
+		fmt.Printf("Sign returned error: %s", err)
 	}
 
-	_, err = client.Transaction.AnnounceAggregateBondedCosignature(context.Background(), signedCosignatureTx)
+	_, err = client.Transaction.Announce(ctx, signedlockFundsTx)
 	if err != nil {
-		fmt.Printf("AnnounceAggregateBoundedCosignature returned error: %s", err)
-		return
+		fmt.Printf("Transaction.Announce returned error: %s", err)
 	}
 
 	time.Sleep(30 * time.Second)
 }
 
-func getAccount(privateKey string) (*sdk.Account, *sdk.AccountInfo) {
-	acc, err := client.NewAccountFromPrivateKey(privateKey)
+func getAccount(privateKey string) *sdk.Account {
+
+	account, err := client.NewAccountFromPrivateKey(privateKey)
 	if err != nil {
-		fmt.Printf("NewAccountFromPrivateKey returned error: %s", err)
+		fmt.Printf("NewAccountFromPublicKey returned error: %s", err)
 	}
 
-	accInfo, err := client.Account.GetAccountInfo(ctx, acc.Address)
+	return account
+}
+
+func getAccounts(pKeys []string) []*sdk.Account {
+
+	for _, pKey := range pKeys {
+		account = getAccount(pKey)
+		accounts = append(accounts, account)
+	}
+
+	return accounts
+}
+
+func getAccountInfo(account *sdk.Account) *sdk.AccountInfo {
+
+	accInfo, err := client.Account.GetAccountInfo(ctx, account.Address)
 	if err != nil {
 		fmt.Printf("GetAccountInfo returned error: %s", err)
 	}
 
-	return acc, accInfo
+	return accInfo
 }
 
 func getXpxBalanceByAccount(accInfo *sdk.AccountInfo) (balance float64) {
 
 	nsId, _ := sdk.NewNamespaceIdFromName("prx.xpx")
-	xpx, _ := client.Resolve.GetMosaicInfoByAssetId(context.Background(), nsId)
+	xpx, _ := client.Resolve.GetMosaicInfoByAssetId(ctx, nsId)
 
 	for _, mosaic := range accInfo.Mosaics {
 		if eq, _ := mosaic.AssetId.Equals(xpx.MosaicId); eq {
@@ -163,13 +196,24 @@ func getXpxBalanceByAccount(accInfo *sdk.AccountInfo) (balance float64) {
 	return balance
 }
 
-func isXpxBalanceSufficient(accInfo *sdk.AccountInfo) bool {
-	xpxBalance := getXpxBalanceByAccount(accInfo)
+func getTotalAggTxFee(aggTx *sdk.AggregateTransaction) float64 {
+	aggTxFee := float64(aggTx.GetAbstractTransaction().MaxFee) / 1000000
 
-	fmt.Printf("Current balance\t: %v\n", xpxBalance)
-	fmt.Printf("Total fee\t: %v\n", FEE)
+	return aggTxFee
+}
 
-	return FEE <= xpxBalance
+func getTotalFee(aggTx *sdk.AggregateTransaction) float64 {
+	totalFee := LOCK_FUND + LOCK_FUND_TX_FEE + getTotalAggTxFee(aggTx)
+
+	return totalFee
+}
+
+func isXpxBalanceSufficient(aggTx *sdk.AggregateTransaction, accInfo *sdk.AccountInfo) bool {
+	fmt.Printf("Current balance\t: %v\n", getXpxBalanceByAccount(accInfo))
+	fmt.Printf("Total AggTxFee\t: %v\n", getTotalAggTxFee(aggTx))
+	fmt.Printf("Total Fee\t: %v\n\n", getTotalFee(aggTx))
+
+	return getTotalFee(aggTx) <= getXpxBalanceByAccount(accInfo)
 }
 
 // Read multisig acc private keys from .txt file
