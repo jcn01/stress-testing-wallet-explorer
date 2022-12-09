@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	baseUrl = "https://api-2.testnet2.xpxsirius.io"
-	TX_FEE  = 1036.3
+	baseUrl          = "https://api-2.testnet2.xpxsirius.io"
+	ASSET_RENTAL_FEE = 1000
 )
 
 var ctx context.Context
@@ -50,16 +50,19 @@ func init() {
 }
 
 func main() {
-	isSufficient := isXpxBalanceSufficient()
+	for i := 0; i < (*number); i++ {
+		mosaicDefinitionTx, mosaicSupplyChangeTx := createAsset()
+		innerTxs = append(innerTxs, mosaicDefinitionTx, mosaicSupplyChangeTx)
+	}
+
+	aggCompleteTx := createAggCompleteTx(innerTxs)
+	isSufficient := isXpxBalanceSufficient(aggCompleteTx)
+
 	if !isSufficient {
 		fmt.Println("Not enough XPX balance!")
 	} else if isSufficient && *number > 0 {
-		fmt.Println("Enough XPX balance, generating list of assets...")
-		for i := 0; i < (*number); i++ {
-			mosaicDefinitionTx, mosaicSupplyChangeTx := createAsset()
-			innerTxs = append(innerTxs, mosaicDefinitionTx, mosaicSupplyChangeTx)
-		}
-		signCreateAssetTx(innerTxs)
+		fmt.Printf("Enough XPX balance, generating list of assets...\n\n")
+		signAggCompleteTx(aggCompleteTx)
 	}
 }
 
@@ -101,17 +104,19 @@ func createAsset() (*sdk.MosaicDefinitionTransaction, *sdk.MosaicSupplyChangeTra
 
 }
 
-func signCreateAssetTx(innerTxs []sdk.Transaction) {
-	// Aggregate complete transaction
-	aggTx, err := client.NewCompleteAggregateTransaction(
+func createAggCompleteTx(innerTxs []sdk.Transaction) *sdk.AggregateTransaction {
+	aggCompleteTx, err := client.NewCompleteAggregateTransaction(
 		sdk.NewDeadline(time.Hour),
 		innerTxs,
 	)
-
 	if err != nil {
 		fmt.Printf("NewCompleteAggregateTransaction returned error: %s", err)
 	}
 
+	return aggCompleteTx
+}
+
+func signAggCompleteTx(aggTx *sdk.AggregateTransaction) {
 	// Sign transaction
 	signedTx, err := account.Sign(aggTx)
 	if err != nil {
@@ -124,10 +129,9 @@ func signCreateAssetTx(innerTxs []sdk.Transaction) {
 		fmt.Printf("Transaction.Announce returned error: %s", err)
 	}
 
-	fmt.Printf("Tx hash: %s\n", signedTx.Hash.String())
+	fmt.Printf("Tx Hash\t: %s\n", signedTx.Hash.String())
 }
 
-// Get xpx balance of an account
 func getXpxBalanceByAccount(accInfo *sdk.AccountInfo) (balance float64) {
 	nsId, _ := sdk.NewNamespaceIdFromName("prx.xpx")
 	xpx, _ := client.Resolve.GetMosaicInfoByAssetId(context.Background(), nsId)
@@ -141,15 +145,31 @@ func getXpxBalanceByAccount(accInfo *sdk.AccountInfo) (balance float64) {
 	return balance
 }
 
+func getTotalAggTxFee(aggTx *sdk.AggregateTransaction) float64 {
+	aggTxFee := float64(aggTx.GetAbstractTransaction().MaxFee) / 1000000
+
+	return aggTxFee
+}
+
+func getTotalAssetRentalFee() float64 {
+	totalAssetRentalFee := ASSET_RENTAL_FEE * (*number)
+
+	return float64(totalAssetRentalFee)
+}
+
+func getTotalFee(aggTx *sdk.AggregateTransaction) float64 {
+	totalFee := getTotalAssetRentalFee() + getTotalAggTxFee(aggTx)
+
+	fmt.Printf("Current Balance\t: %v\n", getXpxBalanceByAccount(accInfo))
+	fmt.Printf("Total RentalFee\t: %v\n", getTotalAssetRentalFee())
+	fmt.Printf("Total AggTxFee\t: %v\n", getTotalAggTxFee(aggTx))
+	fmt.Printf("Total Fee\t: %v\n\n", totalFee)
+
+	return totalFee
+}
+
 // Check if private key account has sufficient balance
-func isXpxBalanceSufficient() bool {
-	xpxBalance := getXpxBalanceByAccount(accInfo)
-	totalTxFee := TX_FEE * float64(*number)
-	maxAsset := int(xpxBalance / TX_FEE)
+func isXpxBalanceSufficient(aggTx *sdk.AggregateTransaction) bool {
 
-	fmt.Printf("Current balance\t: %v\n", xpxBalance)
-	fmt.Printf("Total fee\t: %v\n", totalTxFee)
-	fmt.Printf("Maximum asset\t: %v\n\n", maxAsset)
-
-	return totalTxFee <= xpxBalance
+	return getTotalFee(aggTx) <= getXpxBalanceByAccount(accInfo)
 }
