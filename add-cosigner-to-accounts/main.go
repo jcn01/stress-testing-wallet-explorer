@@ -52,12 +52,12 @@ func main() {
 
 	publicKeys := readFile()
 	multisigAccounts := getAccounts(publicKeys)
-
+	cosignatories = append(cosignatories, cosigner)
+	
 	for i := range multisigAccounts {
 		trx := addCosigner(multisigAccounts[i])
 		trxs = append(trxs, trx)
 		if i != 0 {
-			cosignatories = append(cosignatories, cosigner)
 			cosignatories = append(cosignatories, multisigAccounts[i])
 		}
 	}
